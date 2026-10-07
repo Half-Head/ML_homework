@@ -1,3 +1,4 @@
 .vscode/
 .hw1/hw1_train.jsonl
 /hw1/_pycache_/
+/hw1/predictions.csv
