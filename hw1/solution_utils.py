@@ -12,12 +12,17 @@ import csv
 import json
 import re
 import pandas as pd
+import numpy as np
 
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import SnowballStemmer
 from sklearn.dummy import DummyClassifier
 from sklearn.metrics import accuracy_score, adjusted_rand_score
+from scipy.sparse.csgraph import connected_components #???
+from scipy.sparse import csr_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.neighbors import NearestNeighbors # не классификатор, возвращает соседей
 
 try:
     stopwords.words("english")
@@ -98,6 +103,29 @@ def build_tables(records):
     dialogs_df = pd.DataFrame(dialogs).set_index("dialog_id")
     turns_df = pd.DataFrame(turns).set_index(["dialog_id", "turn_idx"])
     return dialogs_df, turns_df
+
+def get_groups(normalized_dialogs, threshold=0.1): 
+    vectorizer = TfidfVectorizer()
+    tf_idf = vectorizer.fit_transform(normalized_dialogs)
+
+    nn = NearestNeighbors(n_neighbors=6, metric="cosine").fit(tf_idf) # возвращает 1-cos ! то есть 0 - идентичные, 1 - разные
+    distances, indices = nn.kneighbors(tf_idf)
+    distances = distances[:, 1:] # убираем расстояние до самого себя, в итоге смотрим 5 соседей каждого по тексту пользователя
+    indices = indices[:, 1:]
+
+    rows, cols = [], []
+    n = distances.shape[0]
+
+    for first in range(n):
+        for j in range(distances.shape[1]):
+            if distances[first, j] <= threshold:
+                second = indices[first, j]
+                rows += [first, second]
+                cols += [second, first]
+
+    sparse_matrix = csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n,n)) # разреженная матрица смежности
+    n_gr, groups = connected_components(sparse_matrix, directed=False) # labels[i] - id группы для i диалога
+    return n_gr, groups
 
 
 # ---------------------------------------------------------------------------
