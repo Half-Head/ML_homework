@@ -65,6 +65,7 @@ def read_labels(path: str, task: str) -> dict[str, str]:
                     labels[record["dialog_id"]] = label
     return labels
 
+
 def build_tables(records):
     dialogs, turns = [], []
     for rec in records:
@@ -98,6 +99,32 @@ def build_tables(records):
     dialogs_df = pd.DataFrame(dialogs).set_index("dialog_id")
     turns_df = pd.DataFrame(turns).set_index(["dialog_id", "turn_idx"])
     return dialogs_df, turns_df
+
+
+def get_users_text(records, text_type='user'):
+    dialogs = []
+    for rec in records:
+        user_parts, all_part = [], []
+        for turn_num, turn in enumerate(rec["turns"]):
+            if turn["role"] == "user":
+                user_parts.append(turn["text"])
+                all_part.append(turn['text'])
+            elif turn["role"] == "assistant":
+                all_part.append(turn["text"])
+
+        if text_type == 'user':
+            dialogs.append({ 
+                "language": rec["language"],
+                "user_text": user_parts,
+            })
+        else:
+            dialogs.append({ 
+               "language": rec["language"],
+                "all_text": all_part,
+            })
+
+    dialogs_df = pd.DataFrame(dialogs)
+    return dialogs_df
 
 
 # ---------------------------------------------------------------------------
