@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import pandas as pd
 
 import nltk
 from nltk.corpus import stopwords
@@ -63,6 +64,40 @@ def read_labels(path: str, task: str) -> dict[str, str]:
                 if label is not None:
                     labels[record["dialog_id"]] = label
     return labels
+
+def build_tables(records):
+    dialogs, turns = [], []
+    for rec in records:
+        user_parts, asst_parts = [], []
+        for turn_num, turn in enumerate(rec["turns"]):
+            turns.append({
+                "dialog_id": rec["dialog_id"],
+                "turn_idx": turn_num,
+                "role": turn["role"],
+                "length": len(turn["text"]),
+                "text": turn["text"],
+            })
+            if turn["role"] == "user":
+                user_parts.append(turn["text"])
+            elif turn["role"] == "assistant":
+                asst_parts.append(turn["text"])
+
+        labels = rec.get("labels") or {}
+        dialogs.append({
+            "dialog_id": rec["dialog_id"],
+            "language": rec["language"],
+            "n_user_turns": rec["n_user_turns"],
+            "user_text": "\n".join(user_parts),
+            "assistant_text": "\n".join(asst_parts),
+            "user_len": sum(len(part) for part in user_parts),
+            "assistant_len": sum(len(part) for part in asst_parts),
+            "reaction": labels.get("reaction"),
+            "task_type": labels.get("task_type"),
+        })
+
+    dialogs_df = pd.DataFrame(dialogs).set_index("dialog_id")
+    turns_df = pd.DataFrame(turns).set_index(["dialog_id", "turn_idx"])
+    return dialogs_df, turns_df
 
 
 # ---------------------------------------------------------------------------
