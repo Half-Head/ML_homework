@@ -35,6 +35,24 @@ LANGUAGES = ("english", "russian")
 STOPWORDS = {language: set(stopwords.words(language)) for language in LANGUAGES}
 STEMMERS = {language: SnowballStemmer(language) for language in LANGUAGES}
 
+CODE_LINE = re.compile( # для очистки от кусков кода
+    r"^\s*(" # ключевые слова только в начале строки
+        r"(def|class\s+\w+|import\s+\w|import|elif|return|else|except|with\s+open\(|from\s+\w+\s+import|using\s+namespace|"
+        r"lambda|yield|async|await|assert|nonlocal|del|global|pass|break|continue)\b"
+        r"|(void|int|long|float|double|char|string|bool|boolean|var|const|"
+        r"function|extends|implements|namespace|struct|enum|"
+        r"interface|package|override|public|private|protected|static)\b"
+        r"|(#include|using\s+namespace)"
+        r"|(console\.\w+|System\.out|print\(|printf\(|fmt\.\w+|cout\s*<<)"
+        r"|(SELECT|INSERT|JOIN)\b"
+    r")"
+    # где угодно
+    r"|(\bnp|\bnumpy\bplt|\bpd|\bsns|\bsklearn|\btorch|\btf|\bnn)\.\w+"
+    r"|(\b\w+(Error|Exception))\b"
+    r"|\bTraceback\b",
+    re.IGNORECASE,
+)
+
 
 # ---------------------------------------------------------------------------
 #  Данные
@@ -103,6 +121,15 @@ def build_tables(records):
     dialogs_df = pd.DataFrame(dialogs).set_index("dialog_id")
     turns_df = pd.DataFrame(turns).set_index(["dialog_id", "turn_idx"])
     return dialogs_df, turns_df
+
+
+def delete_code_lines(text):
+    if not isinstance(text, str):
+        return ""
+    lines = text.split("\n")
+    keep = [line for line in lines if not CODE_LINE.search(line)]
+    return "\n".join(keep).strip()
+
 
 def get_groups(normalized_dialogs, threshold=0.1): 
     vectorizer = TfidfVectorizer()
