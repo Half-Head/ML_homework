@@ -115,16 +115,18 @@ def get_users_text(records, text_type='user'):
         if text_type == 'user':
             dialogs.append({ 
                 "language": rec["language"],
-                "user_text": user_parts,
+                "text": user_parts,
             })
         else:
             dialogs.append({ 
                "language": rec["language"],
-                "all_text": all_part,
+                "text": all_part,
             })
 
     dialogs_df = pd.DataFrame(dialogs)
     return dialogs_df
+
+
 
 
 # ---------------------------------------------------------------------------
