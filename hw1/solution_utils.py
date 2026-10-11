@@ -187,6 +187,7 @@ def dialog_text(dialog: dict) -> str:
     return text
 
 
+# TODO: чтобы можно было взять конкретные итерации диалога
 def clean_normalize_dialog(dialog, include_assistant=False):
     """Все реплики одной строкой из нормализованных слов 
     с предварительной очисткой от кода.
