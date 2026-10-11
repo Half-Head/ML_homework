@@ -47,7 +47,7 @@ CODE_LINE = re.compile( # для очистки от кусков кода
         r"|(SELECT|INSERT|JOIN)\b"
     r")"
     # где угодно
-    r"|(\bnp|\bnumpy\bplt|\bpd|\bsns|\bsklearn|\btorch|\btf|\bnn)\.\w+"
+    r"|(\bnp|\bnumpy|\bplt|\bpd|\bsns|\bsklearn|\btorch|\btf|\bnn)\.\w+"
     r"|(\b\w+(Error|Exception))\b"
     r"|\bTraceback\b",
     re.IGNORECASE,
@@ -88,7 +88,10 @@ def read_labels(path: str, task: str) -> dict[str, str]:
                     labels[record["dialog_id"]] = label
     return labels
 
+
 def build_tables(records):
+    """Строит 2 таблицы для удобного просмотра данных."""
+
     dialogs, turns = [], []
     for rec in records:
         user_parts, asst_parts = [], []
@@ -123,17 +126,13 @@ def build_tables(records):
     return dialogs_df, turns_df
 
 
-def delete_code_lines(text):
-    if not isinstance(text, str):
-        return ""
-    lines = text.split("\n")
-    keep = [line for line in lines if not CODE_LINE.search(line)]
-    return "\n".join(keep).strip()
+def get_groups(dialogs, threshold=0.1): 
+    """Разбивает диалоги на группы по косинусной близости.
 
-
-def get_groups(normalized_dialogs, threshold=0.1): 
+    Возвращает число групп и номер группы для каждого диалога.
+    """
     vectorizer = TfidfVectorizer()
-    tf_idf = vectorizer.fit_transform(normalized_dialogs)
+    tf_idf = vectorizer.fit_transform(dialogs)
 
     nn = NearestNeighbors(n_neighbors=6, metric="cosine").fit(tf_idf) # возвращает 1-cos ! то есть 0 - идентичные, 1 - разные
     distances, indices = nn.kneighbors(tf_idf)
@@ -172,11 +171,36 @@ def normalize(text: str) -> list[str]:
     return stems
 
 
+def delete_code_lines(text):
+    """Удаляет из текста строки, считающиеся кодом."""
+    if not isinstance(text, str):
+        return ""
+    lines = text.split("\n")
+    keep = [line for line in lines if not CODE_LINE.search(line)]
+    return "\n".join(keep).strip()
+
+
 def dialog_text(dialog: dict) -> str:
     """Все реплики пользователя одной строкой из нормализованных слов."""
     user_text = " ".join(turn["text"] for turn in dialog["turns"] if turn["role"] == "user")
     text = " ".join(normalize(user_text))
     return text
+
+
+def clean_normalize_dialog(dialog, include_assistant=False):
+    """Все реплики одной строкой из нормализованных слов 
+    с предварительной очисткой от кода.
+    
+    include_assistant=False -> только реплики пользователя.
+    """
+    if include_assistant:
+        text = "\n".join(turn["text"] for turn in dialog["turns"])
+    else:
+        text = "\n".join(turn["text"] for turn in dialog["turns"] if turn["role"] == "user")
+
+    text_no_code = delete_code_lines(text)
+    clean_norm_text = " ".join(normalize(text_no_code))
+    return clean_norm_text
 
 
 # ---------------------------------------------------------------------------
