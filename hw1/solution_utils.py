@@ -13,16 +13,17 @@ import json
 import re
 import pandas as pd
 import numpy as np
-
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import SnowballStemmer
 from sklearn.dummy import DummyClassifier
-from sklearn.metrics import accuracy_score, adjusted_rand_score
+from sklearn.metrics import (adjusted_rand_score, f1_score, accuracy_score, balanced_accuracy_score,
+                            precision_score, recall_score, confusion_matrix)
 from scipy.sparse.csgraph import connected_components #???
 from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors # не классификатор, возвращает соседей
+
 
 try:
     stopwords.words("english")
@@ -35,6 +36,7 @@ LANGUAGES = ("english", "russian")
 STOPWORDS = {language: set(stopwords.words(language)) for language in LANGUAGES}
 STEMMERS = {language: SnowballStemmer(language) for language in LANGUAGES}
 
+SEED = 42
 CODE_LINE = re.compile( # для очистки от кусков кода
     r"^\s*(" # ключевые слова только в начале строки
         r"(def|class\s+\w+|import\s+\w|import|elif|return|else|except|with\s+open\(|from\s+\w+\s+import|using\s+namespace|"
@@ -296,3 +298,33 @@ def save_predictions(path: str, dialogs: list[dict], predictions: dict[str, dict
             for name, answers in by_model.items():
                 for dialog, answer in zip(dialogs, answers):
                     writer.writerow([dialog["dialog_id"], task, name, answer])
+
+
+def calculate_metrics(y_true, y_pred, labels):
+    """Считает метрики ...
+    y_true - истинные значения
+    y_pred - предсказание
+    labels - список меток в нужном порядке
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    metrics = {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "macro-f1": f1_score(y_true, y_pred, labels=labels, average='macro', zero_division=0),
+        "weighted-f1": f1_score(y_true, y_pred, labels=labels, average='weighted', zero_division=0),
+        "confusion_matrix": confusion_matrix(y_true, y_pred, labels=labels)
+    }
+
+    precision = precision_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    recall = recall_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    f1 = f1_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    per_class_metrics = {}
+    for i in range(len(labels)):
+        per_class_metrics[f"precision_{labels[i]}"] = precision[i]
+        per_class_metrics[f"recall_{labels[i]}"] = recall[i]
+        per_class_metrics[f"f1_{labels[i]}"] = f1[i]
+    metrics["per_class_metrics"] = per_class_metrics
+    
+    return metrics
