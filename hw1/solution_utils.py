@@ -190,7 +190,7 @@ def dialog_text(dialog: dict) -> str:
 
 
 # TODO: чтобы можно было взять конкретные итерации диалога
-def clean_normalize_dialog(dialog, include_assistant=False):
+def clean_normalize_dialog(dialog, include_assistant=False, clean_code=True):
     """Все реплики одной строкой из нормализованных слов 
     с предварительной очисткой от кода.
     
@@ -201,8 +201,9 @@ def clean_normalize_dialog(dialog, include_assistant=False):
     else:
         text = "\n".join(turn["text"] for turn in dialog["turns"] if turn["role"] == "user")
 
-    text_no_code = delete_code_lines(text)
-    clean_norm_text = " ".join(normalize(text_no_code))
+    if clean_code:
+        text = delete_code_lines(text)
+    clean_norm_text = " ".join(normalize(text))
     return clean_norm_text
 
 
