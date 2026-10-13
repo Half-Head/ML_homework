@@ -13,16 +13,17 @@ import json
 import re
 import pandas as pd
 import numpy as np
-
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import SnowballStemmer
 from sklearn.dummy import DummyClassifier
-from sklearn.metrics import accuracy_score, adjusted_rand_score
+from sklearn.metrics import (adjusted_rand_score, f1_score, accuracy_score, balanced_accuracy_score,
+                            precision_score, recall_score, confusion_matrix)
 from scipy.sparse.csgraph import connected_components #???
 from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors # не классификатор, возвращает соседей
+
 
 try:
     stopwords.words("english")
@@ -34,6 +35,25 @@ CYRILLIC = re.compile(r"[Ѐ-ӿ]")
 LANGUAGES = ("english", "russian")
 STOPWORDS = {language: set(stopwords.words(language)) for language in LANGUAGES}
 STEMMERS = {language: SnowballStemmer(language) for language in LANGUAGES}
+
+SEED = 42
+CODE_LINE = re.compile( # для очистки от кусков кода
+    r"^\s*(" # ключевые слова только в начале строки
+        r"(def|class\s+\w+|import\s+\w|import|elif|return|else|except|with\s+open\(|from\s+\w+\s+import|using\s+namespace|"
+        r"lambda|yield|async|await|assert|nonlocal|del|global|pass|break|continue)\b"
+        r"|(void|int|long|float|double|char|string|bool|boolean|var|const|"
+        r"function|extends|implements|namespace|struct|enum|"
+        r"interface|package|override|public|private|protected|static)\b"
+        r"|(#include|using\s+namespace)"
+        r"|(console\.\w+|System\.out|print\(|printf\(|fmt\.\w+|cout\s*<<)"
+        r"|(SELECT|INSERT|JOIN)\b"
+    r")"
+    # где угодно
+    r"|(\bnp|\bnumpy|\bplt|\bpd|\bsns|\bsklearn|\btorch|\btf|\bnn)\.\w+"
+    r"|(\b\w+(Error|Exception))\b"
+    r"|\bTraceback\b",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +92,8 @@ def read_labels(path: str, task: str) -> dict[str, str]:
 
 
 def build_tables(records):
+    """Строит 2 таблицы для удобного просмотра данных."""
+
     dialogs, turns = [], []
     for rec in records:
         user_parts, asst_parts = [], []
@@ -105,9 +127,14 @@ def build_tables(records):
     turns_df = pd.DataFrame(turns).set_index(["dialog_id", "turn_idx"])
     return dialogs_df, turns_df
 
-def get_groups(normalized_dialogs, threshold=0.1): 
+
+def get_groups(dialogs, threshold=0.1): 
+    """Разбивает диалоги на группы по косинусной близости.
+
+    Возвращает число групп и номер группы для каждого диалога.
+    """
     vectorizer = TfidfVectorizer()
-    tf_idf = vectorizer.fit_transform(normalized_dialogs)
+    tf_idf = vectorizer.fit_transform(dialogs)
 
     nn = NearestNeighbors(n_neighbors=6, metric="cosine").fit(tf_idf) # возвращает 1-cos ! то есть 0 - идентичные, 1 - разные
     distances, indices = nn.kneighbors(tf_idf)
@@ -174,11 +201,38 @@ def normalize(text: str) -> list[str]:
     return stems
 
 
+def delete_code_lines(text):
+    """Удаляет из текста строки, считающиеся кодом."""
+    if not isinstance(text, str):
+        return ""
+    lines = text.split("\n")
+    keep = [line for line in lines if not CODE_LINE.search(line)]
+    return "\n".join(keep).strip()
+
+
 def dialog_text(dialog: dict) -> str:
     """Все реплики пользователя одной строкой из нормализованных слов."""
     user_text = " ".join(turn["text"] for turn in dialog["turns"] if turn["role"] == "user")
     text = " ".join(normalize(user_text))
     return text
+
+
+# TODO: чтобы можно было взять конкретные итерации диалога
+def clean_normalize_dialog(dialog, include_assistant=False, clean_code=True):
+    """Все реплики одной строкой из нормализованных слов 
+    с предварительной очисткой от кода.
+    
+    include_assistant=False -> только реплики пользователя.
+    """
+    if include_assistant:
+        text = "\n".join(turn["text"] for turn in dialog["turns"])
+    else:
+        text = "\n".join(turn["text"] for turn in dialog["turns"] if turn["role"] == "user")
+
+    if clean_code:
+        text = delete_code_lines(text)
+    clean_norm_text = " ".join(normalize(text))
+    return clean_norm_text
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +327,33 @@ def save_predictions(path: str, dialogs: list[dict], predictions: dict[str, dict
             for name, answers in by_model.items():
                 for dialog, answer in zip(dialogs, answers):
                     writer.writerow([dialog["dialog_id"], task, name, answer])
+
+
+def calculate_metrics(y_true, y_pred, labels):
+    """Считает метрики ...
+    y_true - истинные значения
+    y_pred - предсказание
+    labels - список меток в нужном порядке
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    metrics = {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "macro-f1": f1_score(y_true, y_pred, labels=labels, average='macro', zero_division=0),
+        "weighted-f1": f1_score(y_true, y_pred, labels=labels, average='weighted', zero_division=0),
+        "confusion_matrix": confusion_matrix(y_true, y_pred, labels=labels)
+    }
+
+    precision = precision_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    recall = recall_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    f1 = f1_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    per_class_metrics = {}
+    for i in range(len(labels)):
+        per_class_metrics[f"precision_{labels[i]}"] = precision[i]
+        per_class_metrics[f"recall_{labels[i]}"] = recall[i]
+        per_class_metrics[f"f1_{labels[i]}"] = f1[i]
+    metrics["per_class_metrics"] = per_class_metrics
+    
+    return metrics
