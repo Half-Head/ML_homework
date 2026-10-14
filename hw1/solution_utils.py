@@ -91,8 +91,19 @@ def read_labels(path: str, task: str) -> dict[str, str]:
     return labels
 
 
-def build_tables(records):
-    """Строит 2 таблицы для удобного просмотра данных."""
+def build_tables(records: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Строит 2 таблицы для удобного просмотра данных.
+
+    Возвращает:
+    dialogs_df:
+        Одна строка = один диалог. Индекс — dialog_id.
+        Колонки: language, n_user_turns, user_text, assistant_text,
+        user_len, assistant_len, reaction, task_type.
+
+    turns_df:
+        Одна строка = одна реплика. MultiIndex (dialog_id, turn_idx).
+        Колонки: role, length, text.
+    """
 
     dialogs, turns = [], []
     for rec in records:
@@ -128,10 +139,14 @@ def build_tables(records):
     return dialogs_df, turns_df
 
 
-def get_groups(dialogs, threshold=0.1): 
+def get_groups(dialogs, threshold: float = 0.1) -> tuple[int, np.ndarray]:
     """Разбивает диалоги на группы по косинусной близости.
 
-    Возвращает число групп и номер группы для каждого диалога.
+    Возвращает:
+    n_gr:
+        Число компонент связности (групп).
+    groups:
+        id группы для каждого диалога.
     """
     vectorizer = TfidfVectorizer()
     tf_idf = vectorizer.fit_transform(dialogs)
@@ -173,7 +188,7 @@ def normalize(text: str) -> list[str]:
     return stems
 
 
-def delete_code_lines(text):
+def delete_code_lines(text: str) -> str:
     """Удаляет из текста строки, считающиеся кодом."""
     if not isinstance(text, str):
         return ""
@@ -189,18 +204,41 @@ def dialog_text(dialog: dict) -> str:
     return text
 
 
-# TODO: чтобы можно было взять конкретные итерации диалога
-def clean_normalize_dialog(dialog, include_assistant=False, clean_code=True):
+def clean_normalize_dialog(
+    dialog: dict,
+    include_assistant: bool = False,
+    clean_code: bool = True,
+    num: int | None = None,
+    position: str = "first",
+) -> str:
     """Все реплики одной строкой из нормализованных слов 
-    с предварительной очисткой от кода.
-    
-    include_assistant=False -> только реплики пользователя.
+
+    include_assistant:
+        Если True — берутся все реплики (user + assistant).
+        Если False — только user-реплики.
+    clean_code:
+        Удалять ли строки кода через delete_code_lines.
+    num:
+        Сколько реплик брать. None — все.
+        Если include_assistant=True, num умножается на 2
+        (то есть по num реплик на каждую роль)!!
+    position: {"first", "last"}, default "first"
+        Брать первые num реплик или последние.
+
     """
     if include_assistant:
-        text = "\n".join(turn["text"] for turn in dialog["turns"])
+        text = [turn["text"] for turn in dialog["turns"]]
+        if num is not None:
+            num *= 2
     else:
-        text = "\n".join(turn["text"] for turn in dialog["turns"] if turn["role"] == "user")
+        text = [turn["text"] for turn in dialog["turns"] if turn["role"] == "user"]
 
+    if num is not None:
+        if position == 'first':
+            text = text[:num]
+        elif position == 'last':
+            text = text[-num:]
+    text = "\n".join(text)
     if clean_code:
         text = delete_code_lines(text)
     clean_norm_text = " ".join(normalize(text))
@@ -301,11 +339,11 @@ def save_predictions(path: str, dialogs: list[dict], predictions: dict[str, dict
                     writer.writerow([dialog["dialog_id"], task, name, answer])
 
 
-def calculate_metrics(y_true, y_pred, labels):
-    """Считает метрики ...
-    y_true - истинные значения
-    y_pred - предсказание
-    labels - список меток в нужном порядке
+def calculate_metrics(y_true, y_pred, labels: list[str]) -> dict:
+    """Считает метрики
+    y_true: Истинные значения
+    y_pred: Предсказание
+    labels: Cписок меток в нужном порядке
     """
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
