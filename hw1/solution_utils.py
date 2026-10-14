@@ -238,6 +238,9 @@ def clean_normalize_dialog(
             text = text[:num]
         elif position == 'last':
             text = text[-num:]
+        else:
+            raise ValueError("position должен быть 'first' или 'last'")
+        
     text = "\n".join(text)
     if clean_code:
         text = delete_code_lines(text)
@@ -367,3 +370,38 @@ def calculate_metrics(y_true, y_pred, labels: list[str]) -> dict:
     metrics["per_class_metrics"] = per_class_metrics
     
     return metrics
+
+
+def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95, max_features=30_000):
+    """TF-IDF для диалогов, представленных списками реплик пользователя.
+
+    user_texts[i] — список или массив строк одного диалога.
+    Если vectorizer не передан, обучает новый.
+    Если передан, только преобразует тексты его словарём.
+
+    Возвращает:
+        X — разреженная матрица (число диалогов, число признаков);
+        vectorizer — обученный TfidfVectorizer.
+    """
+    documents = [
+        "\n".join(parts)
+        for parts in user_texts
+    ]
+
+    if vectorizer is None:
+        vectorizer = TfidfVectorizer(
+            tokenizer=normalize,
+            token_pattern=None,
+            lowercase=False,  # normalize уже приводит к нижнему регистру
+            ngram_range=(1, 2),
+            min_df=min_df,
+            max_df=max_df,
+            max_features=max_features,
+            sublinear_tf=True,
+            norm="l2",
+        )
+        X = vectorizer.fit_transform(documents)
+    else:
+        X = vectorizer.transform(documents)
+
+    return X, vectorizer
