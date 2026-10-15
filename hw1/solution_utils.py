@@ -54,6 +54,13 @@ CODE_LINE = re.compile( # для очистки от кусков кода
     r"|\bTraceback\b",
     re.IGNORECASE,
 )
+CODE_BLOCK_PATTERN = re.compile(
+    r'("""|\'\'\'|```|~~~)'
+    r'.*?' # до первого закрытия
+    r'\1', # закрывает та же последовательность 
+    re.DOTALL, # соединяет переносы строк
+)
+
 
 
 # ---------------------------------------------------------------------------
@@ -188,10 +195,16 @@ def normalize(text: str) -> list[str]:
     return stems
 
 
-def delete_code_lines(text: str) -> str:
-    """Удаляет из текста строки, считающиеся кодом."""
+def remove_code_blocks(text: str) -> str:
+    """Удаляет блоки кода между тройными кавычками"""
     if not isinstance(text, str):
         return ""
+    return CODE_BLOCK_PATTERN.sub("", text)
+
+
+def delete_code_lines(text: str) -> str:
+    """Удаляет из текста строки, считающиеся кодом."""
+    text = remove_code_blocks(text)
     lines = text.split("\n")
     keep = [line for line in lines if not CODE_LINE.search(line)]
     return "\n".join(keep).strip()
