@@ -188,7 +188,7 @@ def get_users_text(records, text_type='user'):
 #  Обработка текста, как на семинаре 4
 # ---------------------------------------------------------------------------
 
-def normalize(text: str) -> list[str]:
+def normalize(text: str, *, using_stopword_and_len = True) -> list[str]:
     """Нижний регистр, слова из букв, без стоп-слов, основы слов.
 
     Язык определяется по доле кириллицы: русский или английский.
@@ -197,8 +197,15 @@ def normalize(text: str) -> list[str]:
     letters = "".join(words)
     language = "russian" if letters and len(CYRILLIC.findall(letters)) > len(letters) / 2 else "english"
     stop, stemmer = STOPWORDS[language], STEMMERS[language]
-    stems = [stemmer.stem(word) for word in words if len(word) >= 2 and word not in stop]
+    if using_stopword_and_len:
+        stems = [stemmer.stem(word) for word in words if len(word) >= 2 and word not in stop]
+    else:
+        stems = [stemmer.stem(word) for word in words]
     return stems
+
+
+def normalize_not_full(text):
+    return normalize(text, using_stopword_and_len=False)
 
 
 def delete_code_lines(text):
@@ -359,7 +366,7 @@ def calculate_metrics(y_true, y_pred, labels):
     return metrics
 
 
-def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95, max_features=30_000):
+def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95, max_features=30_000, full_normalize=True):
     """TF-IDF для диалогов, представленных списками реплик пользователя.
 
     user_texts[i] — список или массив строк одного диалога.
@@ -375,9 +382,14 @@ def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95,
         for parts in user_texts
     ]
 
+    if full_normalize:
+        normalize_func = normalize
+    else: 
+        normalize_func = normalize_not_full
+
     if vectorizer is None:
         vectorizer = TfidfVectorizer(
-            tokenizer=normalize,
+            tokenizer=normalize_func,
             token_pattern=None,
             lowercase=False,  # normalize уже приводит к нижнему регистру
             ngram_range=(1, 2),
