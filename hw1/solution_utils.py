@@ -14,12 +14,16 @@ import re
 import pandas as pd
 import numpy as np
 import nltk
+import os
+import joblib
+from pathlib import Path
 from nltk.corpus import stopwords
 from nltk.stem import SnowballStemmer
 from sklearn.dummy import DummyClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (adjusted_rand_score, f1_score, accuracy_score, balanced_accuracy_score,
                             precision_score, recall_score, confusion_matrix)
-from scipy.sparse.csgraph import connected_components #???
+from scipy.sparse.csgraph import connected_components 
 from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors # не классификатор, возвращает соседей
@@ -54,6 +58,13 @@ CODE_LINE = re.compile( # для очистки от кусков кода
     r"|\bTraceback\b",
     re.IGNORECASE,
 )
+CODE_BLOCK_PATTERN = re.compile(
+    r'("""|\'\'\'|```|~~~)'
+    r'.*?' # до первого закрытия
+    r'\1', # закрывает та же последовательность 
+    re.DOTALL, # соединяет переносы строк
+)
+
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +102,19 @@ def read_labels(path: str, task: str) -> dict[str, str]:
     return labels
 
 
-def build_tables(records):
-    """Строит 2 таблицы для удобного просмотра данных."""
+def build_tables(records: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Строит 2 таблицы для удобного просмотра данных.
+
+    Возвращает:
+    dialogs_df:
+        Одна строка = один диалог. Индекс — dialog_id.
+        Колонки: language, n_user_turns, user_text, assistant_text,
+        user_len, assistant_len, reaction, task_type.
+
+    turns_df:
+        Одна строка = одна реплика. MultiIndex (dialog_id, turn_idx).
+        Колонки: role, length, text.
+    """
 
     dialogs, turns = [], []
     for rec in records:
@@ -128,10 +150,14 @@ def build_tables(records):
     return dialogs_df, turns_df
 
 
-def get_groups(dialogs, threshold=0.1): 
+def get_groups(dialogs, threshold: float = 0.1) -> tuple[int, np.ndarray]:
     """Разбивает диалоги на группы по косинусной близости.
 
-    Возвращает число групп и номер группы для каждого диалога.
+    Возвращает:
+    n_gr:
+        Число компонент связности (групп).
+    groups:
+        id группы для каждого диалога.
     """
     vectorizer = TfidfVectorizer()
     tf_idf = vectorizer.fit_transform(dialogs)
@@ -204,14 +230,16 @@ def normalize(text: str, *, using_stopword_and_len = True) -> list[str]:
     return stems
 
 
-def normalize_not_full(text):
-    return normalize(text, using_stopword_and_len=False)
-
-
-def delete_code_lines(text):
-    """Удаляет из текста строки, считающиеся кодом."""
+def remove_code_blocks(text: str) -> str:
+    """Удаляет блоки кода между тройными кавычками"""
     if not isinstance(text, str):
         return ""
+    return CODE_BLOCK_PATTERN.sub("", text)
+
+
+def delete_code_lines(text: str) -> str:
+    """Удаляет из текста строки, считающиеся кодом."""
+    text = remove_code_blocks(text)
     lines = text.split("\n")
     keep = [line for line in lines if not CODE_LINE.search(line)]
     return "\n".join(keep).strip()
@@ -224,18 +252,44 @@ def dialog_text(dialog: dict) -> str:
     return text
 
 
-# TODO: чтобы можно было взять конкретные итерации диалога
-def clean_normalize_dialog(dialog, include_assistant=False, clean_code=True):
+def clean_normalize_dialog(
+    dialog: dict,
+    include_assistant: bool = False,
+    clean_code: bool = True,
+    num: int | None = None,
+    position: str = "first",
+) -> str:
     """Все реплики одной строкой из нормализованных слов 
-    с предварительной очисткой от кода.
-    
-    include_assistant=False -> только реплики пользователя.
+
+    include_assistant:
+        Если True — берутся все реплики (user + assistant).
+        Если False — только user-реплики.
+    clean_code:
+        Удалять ли строки кода через delete_code_lines.
+    num:
+        Сколько реплик брать. None — все.
+        Если include_assistant=True, num умножается на 2
+        (то есть по num реплик на каждую роль)!!
+    position: {"first", "last"}, default "first"
+        Брать первые num реплик или последние.
+
     """
     if include_assistant:
-        text = "\n".join(turn["text"] for turn in dialog["turns"])
+        text = [turn["text"] for turn in dialog["turns"]]
+        if num is not None:
+            num *= 2
     else:
-        text = "\n".join(turn["text"] for turn in dialog["turns"] if turn["role"] == "user")
+        text = [turn["text"] for turn in dialog["turns"] if turn["role"] == "user"]
 
+    if num is not None:
+        if position == 'first':
+            text = text[:num]
+        elif position == 'last':
+            text = text[-num:]
+        else:
+            raise ValueError("position должен быть 'first' или 'last'")
+        
+    text = "\n".join(text)
     if clean_code:
         text = delete_code_lines(text)
     clean_norm_text = " ".join(normalize(text))
@@ -246,25 +300,31 @@ def clean_normalize_dialog(dialog, include_assistant=False, clean_code=True):
 #  Модели: реакция пользователя
 # ---------------------------------------------------------------------------
 
-def init_reaction_models(train_path: str) -> dict[str, DummyClassifier]:
+def init_reaction_models() -> dict[str, DummyClassifier]:
     """Все модели задачи 1: имя -> готовая к предсказанию модель.
-
-    В примере модели обучаются прямо здесь на размеченных диалогах
-    из train_path. В вашем решении здесь загрузка из artifacts.
     """
-    texts, labels = _training_data(train_path, "reaction")
+    artifacts = Path("artifacts") / "reactions"
     models = {
-        "dummy_most_frequent": DummyClassifier(strategy="most_frequent").fit(texts, labels),
-        "dummy_stratified": DummyClassifier(strategy="stratified", random_state=0).fit(texts, labels),
+        "dummy_most_frequent": joblib.load(artifacts / "dmf.joblib"),
+        "dummy_stratified": joblib.load(artifacts / "ds.joblib"),
+        "complement_nb": joblib.load(artifacts / "nb.joblib"),
+        "log_reg": joblib.load(artifacts / "log_reg.joblib"),
+        "linear_svc": joblib.load(artifacts / "svc.joblib"),
+        "my_model": joblib.load(artifacts / "mymodel.joblib"),
     }
     return models
 
 
 def predict_reaction(model, dialogs: list[dict]) -> list[str]:
     """По одному ответу на диалог: "positive", "neutral" или "negative"."""
-    texts = [dialog_text(dialog) for dialog in dialogs]
-    answers = [str(label) for label in model.predict(texts)]
-    return answers
+    if isinstance(model, dict) and "model" in model and "vectorizer" in model:
+        texts = [clean_normalize_dialog(d) for d in dialogs]
+        texts_tfidf = model["vectorizer"].transform(texts)
+        return [str(label) for label in model["model"].predict(texts_tfidf)]
+
+    #для своей модели
+    return [str(label) for label in model.predict(dialogs)]
+
 
 
 # ---------------------------------------------------------------------------
@@ -336,11 +396,11 @@ def save_predictions(path: str, dialogs: list[dict], predictions: dict[str, dict
                     writer.writerow([dialog["dialog_id"], task, name, answer])
 
 
-def calculate_metrics(y_true, y_pred, labels):
-    """Считает метрики ...
-    y_true - истинные значения
-    y_pred - предсказание
-    labels - список меток в нужном порядке
+def calculate_metrics(y_true, y_pred, labels: list[str]) -> dict:
+    """Считает метрики
+    y_true: Истинные значения
+    y_pred: Предсказание
+    labels: Cписок меток в нужном порядке
     """
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
@@ -366,7 +426,7 @@ def calculate_metrics(y_true, y_pred, labels):
     return metrics
 
 
-def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95, max_features=30_000, full_normalize=True, ngram_range=(1,2)):
+def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95, max_features=30_000, ngram_range=(1,2)):
     """TF-IDF для диалогов, представленных списками реплик пользователя.
 
     user_texts[i] — список или массив строк одного диалога.
@@ -382,14 +442,9 @@ def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95,
         for parts in user_texts
     ]
 
-    if full_normalize:
-        normalize_func = normalize
-    else: 
-        normalize_func = normalize_not_full
-
     if vectorizer is None:
         vectorizer = TfidfVectorizer(
-            tokenizer=normalize_func,
+            tokenizer=normalize,
             token_pattern=None,
             lowercase=False,  # normalize уже приводит к нижнему регистру
             ngram_range=ngram_range,
@@ -406,52 +461,78 @@ def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95,
     return X, vectorizer
 
 
-def find_duplicate_groups(texts, threshold=0.1):
-    """Группы кандидатов в дубликаты по TF-IDF.
+# ---------------------------------------------------------------------------
+#  Сохранение моделей
+# ---------------------------------------------------------------------------
 
-    threshold — максимальное косинусное расстояние.
-    Нулевые векторы оставляем отдельными объектами.
-    """
-    vectorizer = TfidfVectorizer(
-        lowercase=True,
-        ngram_range=(1, 2),
-        min_df=1,
-        max_df=1.0,
-    )
 
-    X = vectorizer.fit_transform(texts)
+def save_model(model, path: str) -> None:
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    joblib.dump(model, path)
+    print(f"сохранено: {path}, {os.path.getsize(path) / 1024:.0f} КБ")
 
-    valid = np.flatnonzero(X.getnnz(axis=1) > 0)
 
-    groups = np.arange(len(texts))
+# ---------------------------------------------------------------------------
+#  Свои модели
+# ---------------------------------------------------------------------------
 
-    if len(valid) == 0:
-        return groups
 
-    X_valid = X[valid]
+class MyModelReactions:
+    def __init__(self, weight=0.4, C=0.1):
+        self.weight = weight
+        self.C = C
 
-    neighbors = NearestNeighbors(
-        metric="cosine",
-        algorithm="brute",
-        n_jobs=-1,
-    ).fit(X_valid)
+        self.vectorizer_full = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
+        self.vectorizer_last2 = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, min_df=6)
 
-    graph = neighbors.radius_neighbors_graph(
-        X_valid,
-        radius=threshold,
-        mode="connectivity",
-    )
+        self.model_full = LogisticRegression(
+            C=C,
+            class_weight="balanced",
+            max_iter=5000,
+            random_state=SEED,
+        )
+        self.model_last2 = LogisticRegression(
+            C=C,
+            class_weight="balanced",
+            max_iter=5000,
+            random_state=SEED,
+        )
 
-    graph = graph.maximum(graph.T)
+        self.classes_ = None
+        self.is_fitted_ = False
 
-    n_groups, labels = connected_components(
-        graph,
-        directed=False,
-    )
+    def fit(self, dialogs, y):
+        full_texts = [clean_normalize_dialog(d) for d in dialogs]
+        last2_texts = [clean_normalize_dialog(d, num=2, position='last') for d in dialogs]
 
-    groups[valid] = labels
+        X_full = self.vectorizer_full.fit_transform(full_texts)
+        X_last2 = self.vectorizer_last2.fit_transform(last2_texts)
 
-    invalid = np.flatnonzero(X.getnnz(axis=1) == 0)
-    groups[invalid] = n_groups + np.arange(len(invalid))
+        self.model_full.fit(X_full, y)
+        self.model_last2.fit(X_last2, y)
 
-    return groups
+        self.classes_ = self.model_full.classes_
+        self.is_fitted_ = True
+
+        return self
+
+    def predict_proba(self, dialogs):
+        if not self.is_fitted_:
+            raise RuntimeError("Сначала fit()")
+
+        full_texts = [clean_normalize_dialog(d) for d in dialogs]
+        last2_texts = [clean_normalize_dialog(d, num=2, position='last') for d in dialogs]
+
+        X_full = self.vectorizer_full.transform(full_texts)
+        X_last2 = self.vectorizer_last2.transform(last2_texts)
+
+        p_full = self.model_full.predict_proba(X_full)
+        p_last2 = self.model_last2.predict_proba(X_last2)
+
+        return self.weight * p_last2 + (1 - self.weight) * p_full
+
+    def predict(self, dialogs):
+        proba = self.predict_proba(dialogs)
+        return self.classes_[proba.argmax(axis=1)]
