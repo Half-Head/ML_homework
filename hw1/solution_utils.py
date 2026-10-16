@@ -449,12 +449,12 @@ def save_model(model, path: str) -> None:
 
 
 class MyModelReactions:
-    def __init__(self, weight=0.4, C=0.1):
+    def __init__(self, weight, C=0.01):
         self.weight = weight
         self.C = C
 
         self.vectorizer_full = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
-        self.vectorizer_last2 = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, min_df=6)
+        self.vectorizer_last2 = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
 
         self.model_full = LogisticRegression(
             C=C,
