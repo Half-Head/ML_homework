@@ -14,12 +14,16 @@ import re
 import pandas as pd
 import numpy as np
 import nltk
+import os
+import joblib
+from pathlib import Path
 from nltk.corpus import stopwords
 from nltk.stem import SnowballStemmer
 from sklearn.dummy import DummyClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (adjusted_rand_score, f1_score, accuracy_score, balanced_accuracy_score,
                             precision_score, recall_score, confusion_matrix)
-from scipy.sparse.csgraph import connected_components #???
+from scipy.sparse.csgraph import connected_components 
 from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors # не классификатор, возвращает соседей
@@ -265,25 +269,31 @@ def clean_normalize_dialog(
 #  Модели: реакция пользователя
 # ---------------------------------------------------------------------------
 
-def init_reaction_models(train_path: str) -> dict[str, DummyClassifier]:
+def init_reaction_models() -> dict[str, DummyClassifier]:
     """Все модели задачи 1: имя -> готовая к предсказанию модель.
-
-    В примере модели обучаются прямо здесь на размеченных диалогах
-    из train_path. В вашем решении здесь загрузка из artifacts.
     """
-    texts, labels = _training_data(train_path, "reaction")
+    artifacts = Path("artifacts") / "reactions"
     models = {
-        "dummy_most_frequent": DummyClassifier(strategy="most_frequent").fit(texts, labels),
-        "dummy_stratified": DummyClassifier(strategy="stratified", random_state=0).fit(texts, labels),
+        "dummy_most_frequent": joblib.load(artifacts / "dmf.joblib"),
+        "dummy_stratified": joblib.load(artifacts / "ds.joblib"),
+        "complement_nb": joblib.load(artifacts / "nb.joblib"),
+        "log_reg": joblib.load(artifacts / "log_reg.joblib"),
+        "linear_svc": joblib.load(artifacts / "svc.joblib"),
+        "my_model": joblib.load(artifacts / "mymodel.joblib"),
     }
     return models
 
 
 def predict_reaction(model, dialogs: list[dict]) -> list[str]:
     """По одному ответу на диалог: "positive", "neutral" или "negative"."""
-    texts = [dialog_text(dialog) for dialog in dialogs]
-    answers = [str(label) for label in model.predict(texts)]
-    return answers
+    if isinstance(model, dict) and "model" in model and "vectorizer" in model:
+        texts = [clean_normalize_dialog(d) for d in dialogs]
+        texts_tfidf = model["vectorizer"].transform(texts)
+        return [str(label) for label in model["model"].predict(texts_tfidf)]
+
+    #для своей модели
+    return [str(label) for label in model.predict(dialogs)]
+
 
 
 # ---------------------------------------------------------------------------
@@ -418,3 +428,80 @@ def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95,
         X = vectorizer.transform(documents)
 
     return X, vectorizer
+
+
+# ---------------------------------------------------------------------------
+#  Сохранение моделей
+# ---------------------------------------------------------------------------
+
+
+def save_model(model, path: str) -> None:
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    joblib.dump(model, path)
+    print(f"сохранено: {path}, {os.path.getsize(path) / 1024:.0f} КБ")
+
+
+# ---------------------------------------------------------------------------
+#  Свои модели
+# ---------------------------------------------------------------------------
+
+
+class MyModelReactions:
+    def __init__(self, weight=0.4, C=0.1):
+        self.weight = weight
+        self.C = C
+
+        self.vectorizer_full = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
+        self.vectorizer_last2 = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, min_df=6)
+
+        self.model_full = LogisticRegression(
+            C=C,
+            class_weight="balanced",
+            max_iter=5000,
+            random_state=SEED,
+        )
+        self.model_last2 = LogisticRegression(
+            C=C,
+            class_weight="balanced",
+            max_iter=5000,
+            random_state=SEED,
+        )
+
+        self.classes_ = None
+        self.is_fitted_ = False
+
+    def fit(self, dialogs, y):
+        full_texts = [clean_normalize_dialog(d) for d in dialogs]
+        last2_texts = [clean_normalize_dialog(d, num=2, position='last') for d in dialogs]
+
+        X_full = self.vectorizer_full.fit_transform(full_texts)
+        X_last2 = self.vectorizer_last2.fit_transform(last2_texts)
+
+        self.model_full.fit(X_full, y)
+        self.model_last2.fit(X_last2, y)
+
+        self.classes_ = self.model_full.classes_
+        self.is_fitted_ = True
+
+        return self
+
+    def predict_proba(self, dialogs):
+        if not self.is_fitted_:
+            raise RuntimeError("Сначала fit()")
+
+        full_texts = [clean_normalize_dialog(d) for d in dialogs]
+        last2_texts = [clean_normalize_dialog(d, num=2, position='last') for d in dialogs]
+
+        X_full = self.vectorizer_full.transform(full_texts)
+        X_last2 = self.vectorizer_last2.transform(last2_texts)
+
+        p_full = self.model_full.predict_proba(X_full)
+        p_last2 = self.model_last2.predict_proba(X_last2)
+
+        return self.weight * p_last2 + (1 - self.weight) * p_full
+
+    def predict(self, dialogs):
+        proba = self.predict_proba(dialogs)
+        return self.classes_[proba.argmax(axis=1)]
