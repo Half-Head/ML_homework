@@ -404,3 +404,54 @@ def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95,
         X = vectorizer.transform(documents)
 
     return X, vectorizer
+
+
+def find_duplicate_groups(texts, threshold=0.1):
+    """Группы кандидатов в дубликаты по TF-IDF.
+
+    threshold — максимальное косинусное расстояние.
+    Нулевые векторы оставляем отдельными объектами.
+    """
+    vectorizer = TfidfVectorizer(
+        lowercase=True,
+        ngram_range=(1, 2),
+        min_df=1,
+        max_df=1.0,
+    )
+
+    X = vectorizer.fit_transform(texts)
+
+    valid = np.flatnonzero(X.getnnz(axis=1) > 0)
+
+    groups = np.arange(len(texts))
+
+    if len(valid) == 0:
+        return groups
+
+    X_valid = X[valid]
+
+    neighbors = NearestNeighbors(
+        metric="cosine",
+        algorithm="brute",
+        n_jobs=-1,
+    ).fit(X_valid)
+
+    graph = neighbors.radius_neighbors_graph(
+        X_valid,
+        radius=threshold,
+        mode="connectivity",
+    )
+
+    graph = graph.maximum(graph.T)
+
+    n_groups, labels = connected_components(
+        graph,
+        directed=False,
+    )
+
+    groups[valid] = labels
+
+    invalid = np.flatnonzero(X.getnnz(axis=1) == 0)
+    groups[invalid] = n_groups + np.arange(len(invalid))
+
+    return groups
