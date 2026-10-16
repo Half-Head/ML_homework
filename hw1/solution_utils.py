@@ -366,7 +366,7 @@ def calculate_metrics(y_true, y_pred, labels):
     return metrics
 
 
-def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95, max_features=30_000, full_normalize=True):
+def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95, max_features=30_000, full_normalize=True, ngram_range=(1,2)):
     """TF-IDF для диалогов, представленных списками реплик пользователя.
 
     user_texts[i] — список или массив строк одного диалога.
@@ -392,7 +392,7 @@ def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95,
             tokenizer=normalize_func,
             token_pattern=None,
             lowercase=False,  # normalize уже приводит к нижнему регистру
-            ngram_range=(1, 2),
+            ngram_range=ngram_range,
             min_df=min_df,
             max_df=max_df,
             max_features=max_features,
