@@ -230,6 +230,10 @@ def normalize(text: str, *, using_stopword_and_len = True) -> list[str]:
     return stems
 
 
+def normalize_not_full(text):
+    return normalize(text, using_stopword_and_len=False)
+
+
 def remove_code_blocks(text: str) -> str:
     """Удаляет блоки кода между тройными кавычками"""
     if not isinstance(text, str):
@@ -426,7 +430,7 @@ def calculate_metrics(y_true, y_pred, labels: list[str]) -> dict:
     return metrics
 
 
-def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95, max_features=30_000, ngram_range=(1,2)):
+def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95, max_features=30_000, full_normalize=True, ngram_range=(1,2)):
     """TF-IDF для диалогов, представленных списками реплик пользователя.
 
     user_texts[i] — список или массив строк одного диалога.
@@ -442,9 +446,14 @@ def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95,
         for parts in user_texts
     ]
 
+    if full_normalize:
+        normalize_func = normalize
+    else: 
+        normalize_func = normalize_not_full
+
     if vectorizer is None:
         vectorizer = TfidfVectorizer(
-            tokenizer=normalize,
+            tokenizer=normalize_func,
             token_pattern=None,
             lowercase=False,  # normalize уже приводит к нижнему регистру
             ngram_range=ngram_range,
@@ -459,6 +468,57 @@ def vectorize_topic_texts(user_texts, *, vectorizer=None, min_df=2, max_df=0.95,
         X = vectorizer.transform(documents)
 
     return X, vectorizer
+
+
+def find_duplicate_groups(texts, threshold=0.1):
+    """Группы кандидатов в дубликаты по TF-IDF.
+
+    threshold — максимальное косинусное расстояние.
+    Нулевые векторы оставляем отдельными объектами.
+    """
+    vectorizer = TfidfVectorizer(
+        lowercase=True,
+        ngram_range=(1, 2),
+        min_df=1,
+        max_df=1.0,
+    )
+
+    X = vectorizer.fit_transform(texts)
+
+    valid = np.flatnonzero(X.getnnz(axis=1) > 0)
+
+    groups = np.arange(len(texts))
+
+    if len(valid) == 0:
+        return groups
+
+    X_valid = X[valid]
+
+    neighbors = NearestNeighbors(
+        metric="cosine",
+        algorithm="brute",
+        n_jobs=-1,
+    ).fit(X_valid)
+
+    graph = neighbors.radius_neighbors_graph(
+        X_valid,
+        radius=threshold,
+        mode="connectivity",
+    )
+
+    graph = graph.maximum(graph.T)
+
+    n_groups, labels = connected_components(
+        graph,
+        directed=False,
+    )
+
+    groups[valid] = labels
+
+    invalid = np.flatnonzero(X.getnnz(axis=1) == 0)
+    groups[invalid] = n_groups + np.arange(len(invalid))
+
+    return groups
 
 
 # ---------------------------------------------------------------------------
@@ -480,12 +540,12 @@ def save_model(model, path: str) -> None:
 
 
 class MyModelReactions:
-    def __init__(self, weight=0.4, C=0.1):
+    def init(self, weight, C=0.01):
         self.weight = weight
         self.C = C
 
         self.vectorizer_full = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
-        self.vectorizer_last2 = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, min_df=6)
+        self.vectorizer_last2 = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
 
         self.model_full = LogisticRegression(
             C=C,
@@ -536,3 +596,85 @@ class MyModelReactions:
     def predict(self, dialogs):
         proba = self.predict_proba(dialogs)
         return self.classes_[proba.argmax(axis=1)]
+
+
+class MyModelTopics:
+    def __init__(
+        self,
+        weight=0.4,
+        C=1,
+        class_weight="balanced",
+        n_first=2,
+        min_df=2,
+        ngram_range=(1, 2),
+        full_normalize=True,
+    ):
+        self.weight = weight
+        self.C = C
+        self.class_weight = class_weight
+        self.n_first = n_first
+
+        self.tfidf_params = {
+            "min_df": min_df,
+            "ngram_range": ngram_range,
+            "full_normalize": full_normalize,
+        }
+
+    def fit(self, texts, y):
+        first_texts = [
+            parts[:self.n_first]
+            for parts in texts
+        ]
+
+        X_full, self.vectorizer_full = vectorize_topic_texts(
+            texts,
+            **self.tfidf_params,
+        )
+        X_first, self.vectorizer_first = vectorize_topic_texts(
+            first_texts,
+            **self.tfidf_params,
+        )
+
+        model_params = {
+            "C": self.C,
+            "class_weight": self.class_weight,
+            "max_iter": 3000,
+            "random_state": 42,
+        }
+
+        self.model_full = LogisticRegression(**model_params)
+        self.model_first = LogisticRegression(**model_params)
+
+        self.model_full.fit(X_full, y)
+        self.model_first.fit(X_first, y)
+
+        self.classes_ = self.model_full.classes_
+
+        return self
+
+    def predict_proba(self, texts):
+        first_texts = [
+            parts[:self.n_first]
+            for parts in texts
+        ]
+
+        X_full, _ = vectorize_topic_texts(
+            texts,
+            vectorizer=self.vectorizer_full,
+        )
+        X_first, _ = vectorize_topic_texts(
+            first_texts,
+            vectorizer=self.vectorizer_first,
+        )
+
+        p_full = self.model_full.predict_proba(X_full)
+        p_first = self.model_first.predict_proba(X_first)
+
+        return (
+            (1 - self.weight) * p_full
+            + self.weight * p_first
+        )
+
+    def predict(self, texts):
+        probabilities = self.predict_proba(texts)
+        return self.classes_[probabilities.argmax(axis=1)]
