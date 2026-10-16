@@ -540,7 +540,7 @@ def save_model(model, path: str) -> None:
 
 
 class MyModelReactions:
-    def __init__(self, weight=0.4, C=0.01):
+    def __init__(self, weight, C=0.01):
         self.weight = weight
         self.C = C
 
