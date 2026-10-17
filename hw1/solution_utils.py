@@ -344,18 +344,31 @@ def init_topic_models(train_path: str) -> dict[str, DummyClassifier]:
     dialog_ids = [dialog["dialog_id"] for dialog in read_dialogs(train_path)]
     one_topic = ["все диалоги"] * len(dialog_ids)
     ten_topics = [f"тема {k % 10}" for k in range(len(dialog_ids))]
+    artifacts = Path("artifacts") / "topics"
     models = {
         "dummy_one_topic": DummyClassifier(strategy="most_frequent").fit(dialog_ids, one_topic),
         "dummy_random_topics": DummyClassifier(strategy="uniform", random_state=0).fit(dialog_ids, ten_topics),
+        'logreg_best': joblib.load(artifacts / "topic_logreg_best.joblib"),
+        'logreg_weighted': joblib.load(artifacts / "topic_my_model_weight1.joblib"),
+        'svc': joblib.load(artifacts / "topic_svc.joblib"),
+        'knn': joblib.load(artifacts / "topic_knn.joblib"),
     }
     return models
 
 
 def predict_topic(model, dialogs: list[dict]) -> list[str]:
     """По одному ответу на диалог: название темы."""
-    texts = [dialog_text(dialog) for dialog in dialogs]
-    answers = [str(label) for label in model.predict(texts)]
-    return answers
+    texts = [[t["text"] for t in d["turns"] if t["role"] == "user"] for d in dialogs]
+    classifier = model["model"] if isinstance(model, dict) else model
+    
+    if isinstance(classifier, MyModelTopics):
+        return [str(label) for label in classifier.predict(texts)]
+
+    texts = ["\n".join(parts) for parts in texts]
+    if isinstance(model, dict) and "vectorizer" in model:
+        texts = model["vectorizer"].transform(texts)
+
+    return [str(label) for label in classifier.predict(texts)]
 
 
 def _training_data(train_path: str, task: str) -> tuple[list[str], list[str]]:
