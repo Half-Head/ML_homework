@@ -315,6 +315,7 @@ def init_reaction_models() -> dict[str, DummyClassifier]:
         "log_reg": joblib.load(artifacts / "log_reg.joblib"),
         "linear_svc": joblib.load(artifacts / "svc.joblib"),
         "my_model": joblib.load(artifacts / "mymodel.joblib"),
+        "logreg_balanced": joblib.load(artifacts / "logreg_balanced.joblib"),
     }
     return models
 
@@ -360,7 +361,7 @@ def predict_topic(model, dialogs: list[dict]) -> list[str]:
     """По одному ответу на диалог: название темы."""
     texts = [[t["text"] for t in d["turns"] if t["role"] == "user"] for d in dialogs]
     classifier = model["model"] if isinstance(model, dict) else model
-    
+
     if isinstance(classifier, MyModelTopics):
         return [str(label) for label in classifier.predict(texts)]
 
