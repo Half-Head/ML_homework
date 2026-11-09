@@ -16,3 +16,5 @@ hw1/pseudo_labels_ver3.txt
 hw1/test_split_ver3.txt
 hw1/val_split_ver3.txt
 hw1/train_split_ver3.txt
+hw1/hidden_labels.jsonl
+hw1/hidden_topic_metrics.csv
