@@ -13,7 +13,9 @@ from __future__ import annotations
 import csv
 import json
 import re
-
+import os
+import joblib
+import numpy as np
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import SnowballStemmer
@@ -22,8 +24,14 @@ from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score
 from sklearn.pipeline import make_pipeline
+from sklearn.metrics import (adjusted_rand_score, f1_score, accuracy_score, balanced_accuracy_score,
+                            precision_score, recall_score, confusion_matrix)
+from scipy.sparse.csgraph import connected_components 
+from scipy.sparse import csr_matrix
+from sklearn.neighbors import NearestNeighbors
+
+SEED = 42
 
 try:
     stopwords.words("english")
@@ -36,8 +44,31 @@ LANGUAGES = ("english", "russian")
 STOPWORDS = {language: set(stopwords.words(language)) for language in LANGUAGES}
 STEMMERS = {language: SnowballStemmer(language) for language in LANGUAGES}
 REACTIONS = ["negative", "neutral", "positive"]
+CODE_LINE = re.compile( # для очистки от кусков кода
+    r"^\s*(" # ключевые слова только в начале строки
+        r"(def|class\s+\w+|import\s+\w|import|elif|return|else|except|with\s+open\(|from\s+\w+\s+import|using\s+namespace|"
+        r"lambda|yield|async|await|assert|nonlocal|del|global|pass|break|continue)\b"
+        r"|(void|int|long|float|double|char|string|bool|boolean|var|const|"
+        r"function|extends|implements|namespace|struct|enum|"
+        r"interface|package|override|public|private|protected|static)\b"
+        r"|(#include|using\s+namespace)"
+        r"|(console\.\w+|System\.out|print\(|printf\(|fmt\.\w+|cout\s*<<)"
+        r"|(SELECT|INSERT|JOIN)\b"
+    r")"
+    # где угодно
+    r"|(\bnp|\bnumpy|\bplt|\bpd|\bsns|\bsklearn|\btorch|\btf|\bnn)\.\w+"
+    r"|(\b\w+(Error|Exception))\b"
+    r"|\bTraceback\b",
+    re.IGNORECASE,
+)
+CODE_BLOCK_PATTERN = re.compile(
+    r'("""|\'\'\'|```|~~~)'
+    r'.*?' # до первого закрытия
+    r'\1', # закрывает та же последовательность 
+    re.DOTALL, # соединяет переносы строк
+)
 
-
+ 
 # ---------------------------------------------------------------------------
 #  Данные
 # ---------------------------------------------------------------------------
@@ -73,6 +104,21 @@ def read_labels(path: str) -> dict[str, str]:
     return labels
 
 
+def remove_code_blocks(text: str) -> str:
+    """Удаляет блоки кода между тройными кавычками"""
+    if not isinstance(text, str):
+        return ""
+    return CODE_BLOCK_PATTERN.sub("", text)
+
+
+def delete_code_lines(text: str) -> str:
+    """Удаляет из текста строки, считающиеся кодом."""
+    text = remove_code_blocks(text)
+    lines = text.split("\n")
+    keep = [line for line in lines if not CODE_LINE.search(line)]
+    return "\n".join(keep).strip()
+
+
 # ---------------------------------------------------------------------------
 #  Обработка текста, как на семинаре 4
 # ---------------------------------------------------------------------------
@@ -95,6 +141,82 @@ def dialog_text(dialog: dict) -> str:
     user_text = " ".join(turn["text"] for turn in dialog["turns"] if turn["role"] == "user")
     text = " ".join(normalize(user_text))
     return text
+
+
+def get_groups(dialogs, threshold: float = 0.1) -> tuple[int, np.ndarray]:
+    """Разбивает диалоги на группы по косинусной близости.
+
+    Возвращает:
+    n_gr:
+        Число компонент связности (групп).
+    groups:
+        id группы для каждого диалога.
+    """
+    vectorizer = TfidfVectorizer()
+    tf_idf = vectorizer.fit_transform(dialogs)
+
+    nn = NearestNeighbors(n_neighbors=6, metric="cosine").fit(tf_idf) # возвращает 1-cos ! то есть 0 - идентичные, 1 - разные
+    distances, indices = nn.kneighbors(tf_idf)
+    distances = distances[:, 1:] # убираем расстояние до самого себя, в итоге смотрим 5 соседей каждого по тексту пользователя
+    indices = indices[:, 1:]
+
+    rows, cols = [], []
+    n = distances.shape[0]
+
+    for first in range(n):
+        for j in range(distances.shape[1]):
+            if distances[first, j] <= threshold:
+                second = indices[first, j]
+                rows += [first, second]
+                cols += [second, first]
+
+    sparse_matrix = csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n,n)) # разреженная матрица смежности
+    n_gr, groups = connected_components(sparse_matrix, directed=False) # labels[i] - id группы для i диалога
+    return n_gr, groups
+
+
+def clean_normalize_dialog(
+    dialog: dict,
+    include_assistant: bool = False,
+    clean_code: bool = True,
+    num: int | None = None,
+    position: str = "first",
+) -> str:
+    """Все реплики одной строкой из нормализованных слов 
+
+    include_assistant:
+        Если True — берутся все реплики (user + assistant).
+        Если False — только user-реплики.
+    clean_code:
+        Удалять ли строки кода через delete_code_lines.
+    num:
+        Сколько реплик брать. None — все.
+        Если include_assistant=True, num умножается на 2
+        (то есть по num реплик на каждую роль)!!
+    position: {"first", "last"}, default "first"
+        Брать первые num реплик или последние.
+
+    """
+    if include_assistant:
+        text = [turn["text"] for turn in dialog["turns"]]
+        if num is not None:
+            num *= 2
+    else:
+        text = [turn["text"] for turn in dialog["turns"] if turn["role"] == "user"]
+
+    if num is not None:
+        if position == 'first':
+            text = text[:num]
+        elif position == 'last':
+            text = text[-num:]
+        else:
+            raise ValueError("position должен быть 'first' или 'last'")
+        
+    text = "\n".join(text)
+    if clean_code:
+        text = delete_code_lines(text)
+    clean_norm_text = " ".join(normalize(text))
+    return clean_norm_text
 
 
 # ---------------------------------------------------------------------------
@@ -171,3 +293,104 @@ def save_predictions(path: str, dialogs: list[dict], predictions: dict[str, list
         for name, answers in predictions.items():
             for dialog, answer in zip(dialogs, answers):
                 writer.writerow([dialog["dialog_id"], "reaction", name, answer])
+
+
+def calculate_metrics(y_true, y_pred, labels: list[str]) -> dict:
+    """Считает метрики
+    y_true: Истинные значения
+    y_pred: Предсказание
+    labels: Cписок меток в нужном порядке
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    metrics = {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "macro-f1": f1_score(y_true, y_pred, labels=labels, average='macro', zero_division=0),
+        "weighted-f1": f1_score(y_true, y_pred, labels=labels, average='weighted', zero_division=0),
+        "confusion_matrix": confusion_matrix(y_true, y_pred, labels=labels)
+    }
+
+    precision = precision_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    recall = recall_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    f1 = f1_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+    per_class_metrics = {}
+    for i in range(len(labels)):
+        per_class_metrics[f"precision_{labels[i]}"] = precision[i]
+        per_class_metrics[f"recall_{labels[i]}"] = recall[i]
+        per_class_metrics[f"f1_{labels[i]}"] = f1[i]
+    metrics["per_class_metrics"] = per_class_metrics
+    
+    return metrics
+
+
+def save_model(model, path: str) -> None:
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    joblib.dump(model, path)
+    print(f"сохранено: {path}, {os.path.getsize(path) / 1024:.0f} КБ")
+
+# ---------------------------------------------------------------------------
+# Свои модели
+# ---------------------------------------------------------------------------
+
+
+class MyModelReactions:
+    def __init__(self, weight, C=0.01):
+        self.weight = weight
+        self.C = C
+
+        self.vectorizer_full = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
+        self.vectorizer_last2 = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
+
+        self.model_full = LogisticRegression(
+            C=C,
+            class_weight="balanced",
+            max_iter=5000,
+            random_state=SEED,
+        )
+        self.model_last2 = LogisticRegression(
+            C=C,
+            class_weight="balanced",
+            max_iter=5000,
+            random_state=SEED,
+        )
+
+        self.classes_ = None
+        self.is_fitted_ = False
+
+    def fit(self, dialogs, y):
+        full_texts = [clean_normalize_dialog(d) for d in dialogs]
+        last2_texts = [clean_normalize_dialog(d, num=2, position='last') for d in dialogs]
+
+        X_full = self.vectorizer_full.fit_transform(full_texts)
+        X_last2 = self.vectorizer_last2.fit_transform(last2_texts)
+
+        self.model_full.fit(X_full, y)
+        self.model_last2.fit(X_last2, y)
+
+        self.classes_ = self.model_full.classes_
+        self.is_fitted_ = True
+
+        return self
+
+    def predict_proba(self, dialogs):
+        if not self.is_fitted_:
+            raise RuntimeError("Сначала fit()")
+
+        full_texts = [clean_normalize_dialog(d) for d in dialogs]
+        last2_texts = [clean_normalize_dialog(d, num=2, position='last') for d in dialogs]
+
+        X_full = self.vectorizer_full.transform(full_texts)
+        X_last2 = self.vectorizer_last2.transform(last2_texts)
+
+        p_full = self.model_full.predict_proba(X_full)
+        p_last2 = self.model_last2.predict_proba(X_last2)
+
+        return self.weight * p_last2 + (1 - self.weight) * p_full
+
+    def predict(self, dialogs):
+        proba = self.predict_proba(dialogs)
+        return self.classes_[proba.argmax(axis=1)]
