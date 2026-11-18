@@ -25,7 +25,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassif
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
-from sklearn.base import clone
+from sklearn.base import clone, BaseEstimator, ClassifierMixin
 from sklearn.metrics import (adjusted_rand_score, f1_score, accuracy_score, balanced_accuracy_score,
                             precision_score, recall_score, confusion_matrix)
 from scipy.sparse.csgraph import connected_components 
@@ -337,20 +337,19 @@ def save_model(model, path: str) -> None:
 # Свои модели
 # ---------------------------------------------------------------------------
 
-class MyModelReactions:
+class MyModelReactions(ClassifierMixin, BaseEstimator):
     def __init__(self, weight, tfidf, model_full, model_last2):
         self.weight = weight
-
-        self.vectorizer_full = clone(tfidf)
-        self.vectorizer_last2 = clone(tfidf)
-
-        self.model_full = clone(model_full)
-        self.model_last2 = clone(model_last2)
-
-        self.classes_ = None
-        self.is_fitted_ = False
+        self.tfidf = tfidf
+        self.model_full = model_full
+        self.model_last2 = model_last2
 
     def fit(self, dialogs, y):
+        self.vectorizer_full = clone(self.tfidf)
+        self.vectorizer_last2 = clone(self.tfidf)
+        self.model_full_ = clone(self.model_full)
+        self.model_last2_ = clone(self.model_last2)
+
         full_texts = [clean_normalize_dialog(d) for d in dialogs]
         last2_texts = [
             clean_normalize_dialog(d, num=2, position="last")
@@ -360,18 +359,13 @@ class MyModelReactions:
         X_full = self.vectorizer_full.fit_transform(full_texts)
         X_last2 = self.vectorizer_last2.fit_transform(last2_texts)
 
-        self.model_full.fit(X_full, y)
-        self.model_last2.fit(X_last2, y)
+        self.model_full_.fit(X_full, y)
+        self.model_last2_.fit(X_last2, y)
 
-        self.classes_ = self.model_full.classes_
-        self.is_fitted_ = True
-
+        self.classes_ = self.model_full_.classes_
         return self
 
     def predict_proba(self, dialogs):
-        if not self.is_fitted_:
-            raise RuntimeError("Сначала fit()")
-
         full_texts = [clean_normalize_dialog(d) for d in dialogs]
         last2_texts = [
             clean_normalize_dialog(d, num=2, position="last")
@@ -381,8 +375,8 @@ class MyModelReactions:
         X_full = self.vectorizer_full.transform(full_texts)
         X_last2 = self.vectorizer_last2.transform(last2_texts)
 
-        p_full = self.model_full.predict_proba(X_full)
-        p_last2 = self.model_last2.predict_proba(X_last2)
+        p_full = self.model_full_.predict_proba(X_full)
+        p_last2 = self.model_last2_.predict_proba(X_last2)
 
         return self.weight * p_last2 + (1 - self.weight) * p_full
 
