@@ -25,6 +25,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassif
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
+from sklearn.base import clone
 from sklearn.metrics import (adjusted_rand_score, f1_score, accuracy_score, balanced_accuracy_score,
                             precision_score, recall_score, confusion_matrix)
 from scipy.sparse.csgraph import connected_components 
@@ -88,17 +89,17 @@ def read_dialogs(path: str) -> list[dict]:
     return dialogs
 
 
-def read_labels(path: str) -> dict[str, str]:
-    """Реакция пользователя: dialog_id -> "positive", "neutral" или "negative".
+def read_labels(path: str, task: str) -> dict[str, str]:
+    """Ответы по задаче task ("reaction" или "topic"): dialog_id -> метка.
 
-    Диалоги без метки реакции пропускаются.
+    Диалоги, у которых такой метки нет, пропускаются.
     """
     labels = {}
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             if line.strip():
                 record = json.loads(line)
-                label = (record.get("labels") or {}).get("reaction")
+                label = (record.get("labels") or {}).get(task)
                 if label is not None:
                     labels[record["dialog_id"]] = label
     return labels
@@ -336,34 +337,25 @@ def save_model(model, path: str) -> None:
 # Свои модели
 # ---------------------------------------------------------------------------
 
-
 class MyModelReactions:
-    def __init__(self, weight, C=0.01):
+    def __init__(self, weight, tfidf, model_full, model_last2):
         self.weight = weight
-        self.C = C
 
-        self.vectorizer_full = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
-        self.vectorizer_last2 = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True)
+        self.vectorizer_full = clone(tfidf)
+        self.vectorizer_last2 = clone(tfidf)
 
-        self.model_full = LogisticRegression(
-            C=C,
-            class_weight="balanced",
-            max_iter=5000,
-            random_state=SEED,
-        )
-        self.model_last2 = LogisticRegression(
-            C=C,
-            class_weight="balanced",
-            max_iter=5000,
-            random_state=SEED,
-        )
+        self.model_full = clone(model_full)
+        self.model_last2 = clone(model_last2)
 
         self.classes_ = None
         self.is_fitted_ = False
 
     def fit(self, dialogs, y):
         full_texts = [clean_normalize_dialog(d) for d in dialogs]
-        last2_texts = [clean_normalize_dialog(d, num=2, position='last') for d in dialogs]
+        last2_texts = [
+            clean_normalize_dialog(d, num=2, position="last")
+            for d in dialogs
+        ]
 
         X_full = self.vectorizer_full.fit_transform(full_texts)
         X_last2 = self.vectorizer_last2.fit_transform(last2_texts)
@@ -381,7 +373,10 @@ class MyModelReactions:
             raise RuntimeError("Сначала fit()")
 
         full_texts = [clean_normalize_dialog(d) for d in dialogs]
-        last2_texts = [clean_normalize_dialog(d, num=2, position='last') for d in dialogs]
+        last2_texts = [
+            clean_normalize_dialog(d, num=2, position="last")
+            for d in dialogs
+        ]
 
         X_full = self.vectorizer_full.transform(full_texts)
         X_last2 = self.vectorizer_last2.transform(last2_texts)
