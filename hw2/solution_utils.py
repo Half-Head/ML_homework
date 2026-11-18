@@ -14,6 +14,10 @@ import csv
 import json
 import re
 import os
+import sys
+import importlib.util
+from pathlib import Path
+from sklearn.ensemble import StackingClassifier
 import joblib
 import numpy as np
 import nltk
@@ -224,41 +228,58 @@ def clean_normalize_dialog(
 #  Модели: hw1_ — старые, hw2_ — новые
 # ---------------------------------------------------------------------------
 
-def init_reaction_models(train_path: str) -> dict:
-    """Все модели: имя -> готовая к предсказанию модель.
+def init_reaction_models(train_path=None):
+    base_path = Path(__file__).resolve().parent
+    hw1_path = base_path.parent / "hw1"
 
-    Имена старых моделей начинаются с hw1_, новых — с hw2_: по префиксу
-    модели делятся на группы при проверке. В примере модели обучаются здесь
-    на размеченных диалогах из train_path; в вашем решении здесь загрузка
-    из artifacts.
-    """
-    texts, labels = _training_data(train_path)
-    models = {
-        "hw1_dummy_most_frequent": DummyClassifier(strategy="most_frequent"),
-        "hw1_tfidf_logreg": make_pipeline(
-            TfidfVectorizer(min_df=2),
-            LogisticRegression(max_iter=1000, class_weight="balanced"),
-        ),
-        "hw2_tfidf_random_forest": make_pipeline(
-            TfidfVectorizer(min_df=2, max_features=5000),
-            RandomForestClassifier(n_estimators=300, class_weight="balanced", n_jobs=-1, random_state=0),
-        ),
-        "hw2_tfidf_svd_boosting": make_pipeline(
-            TfidfVectorizer(min_df=2),
-            TruncatedSVD(n_components=100, random_state=0),
-            HistGradientBoostingClassifier(class_weight="balanced", random_state=0),
-        ),
-    }
-    for model in models.values():
-        model.fit(texts, labels)
+    # Исходный класс нужен для загрузки старой MyModel.
+    spec = importlib.util.spec_from_file_location(
+        "hw1_solution_utils", hw1_path / "solution_utils.py"
+    )
+    hw1_utils = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = hw1_utils
+    spec.loader.exec_module(hw1_utils)
+
+    models = {}
+    current_utils = sys.modules["solution_utils"]
+    try:
+        sys.modules["solution_utils"] = hw1_utils
+        for name in ["log_reg", "logreg_balanced", "mymodel", "svc", "dmf", "ds", "nb"]:
+            models[f"hw1_{name}"] = joblib.load(
+                hw1_path / "artifacts/reactions" / f"{name}.joblib"
+            )
+    finally:
+        sys.modules["solution_utils"] = current_utils
+
+    for name in [
+        "bagging", "random_forest", "lightgbm", "catboost",
+        "stacking", "mymodel_lightgbm_stacking",
+    ]:
+        models[f"hw2_{name}"] = joblib.load(
+            base_path / "artifacts" / f"{name}.joblib"
+        )
+
     return models
 
 
-def predict_reaction(model, dialogs: list[dict]) -> list[str]:
-    """По одному ответу на диалог: "positive", "neutral" или "negative"."""
-    texts = [dialog_text(dialog) for dialog in dialogs]
-    answers = [str(label) for label in model.predict(texts)]
-    return answers
+def predict_reaction(saved, dialogs):
+    if not isinstance(saved, dict):
+        answers = saved.predict(dialogs)
+    else:
+        model = saved["model"]
+
+        if isinstance(model, MyModelReactions):
+            answers = model.predict(dialogs)
+        else:
+            texts = [clean_normalize_dialog(d) for d in dialogs]
+
+            if isinstance(model, StackingClassifier):
+                answers = model.predict(texts)
+            else:
+                features = saved["vectorizer"].transform(texts)
+                answers = model.predict(features)
+
+    return np.asarray(answers).ravel().astype(str).tolist()
 
 
 def _training_data(train_path: str) -> tuple[list[str], list[str]]:
